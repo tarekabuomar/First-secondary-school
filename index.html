@@ -568,9 +568,24 @@ async function deleteHomework(id,title,btn){
 }
 async function openHomework(id){let {data,error}=await SB.from('assignment_questions').select('question_id').eq('assignment_id',id).order('sort_order');if(error){toastMsg(error.message);return}ACTIVE_ASSIGNMENT_ID=id;ACTIVE_ASSIGNMENT_QIDS=new Set((data||[]).map(x=>x.question_id));testFilter='all';go('tests');renderAllQuiz()}
 function exitHomeworkMode(){ACTIVE_ASSIGNMENT_ID=null;ACTIVE_ASSIGNMENT_QIDS=null;renderAllQuiz()}
-function cleanCloneForPublish(){
- let root=document.documentElement.cloneNode(true),body=root.querySelector('body');
- // Never publish runtime-only navigation elements; they are recreated once on load.
+async function cleanCloneForPublish(){
+ // Build the publish payload from the ORIGINAL document source, not the live DOM.
+ // The live DOM may contain runtime-generated nodes/attributes that are not part of the
+ // actual application source and can be rejected by the publish validator.
+ let source='';
+ try{
+   let u=new URL(location.href);u.searchParams.set('_publish_source',Date.now().toString());
+   let r=await fetch(u.toString(),{cache:'no-store',credentials:'same-origin'});
+   if(!r.ok)throw new Error('Could not read the application source ('+r.status+').');
+   source=await r.text();
+ }catch(e){
+   // Fallback is still useful when the page is opened from a local file.
+   source='<!doctype html>\n'+document.documentElement.outerHTML;
+ }
+ let parsed=new DOMParser().parseFromString(source,'text/html');
+ if(!parsed?.documentElement||!parsed.body)throw new Error('Generated application HTML is incomplete.');
+ let root=parsed.documentElement,body=parsed.body;
+ // Never publish runtime-only navigation elements.
  root.querySelectorAll('#appBackWrap,[data-app-dynamic="back"]').forEach(e=>e.remove());
  if(body){body.className='auth-locked';body.removeAttribute('style')}
  let ag=root.querySelector('#authGate');if(ag)ag.removeAttribute('style');
@@ -580,20 +595,27 @@ function cleanCloneForPublish(){
  root.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));root.querySelector('.tab')?.classList.add('active');
  ['allQuiz','mistakesList','reviewList','homeworkList','studentTableBody','writtenReviewList','studentDetail','words','defs','words456','defs456','publishResult','teacherRefreshStatus','newStudentResult'].forEach(id=>{let e=root.querySelector('#'+id);if(e)e.innerHTML=''});
  ['studentPinLogin','studentNameRegister','teacherPasswordLogin','recoveryCode','recoveryPassword','newStudentName','newStudentCode','newStudentPin','assignmentTitle','assignmentDesc'].forEach(id=>{let e=root.querySelector('#'+id);if(e){e.removeAttribute('value');e.textContent=''}});
- return '<!doctype html>\n'+root.outerHTML;
+ let html='<!doctype html>\n'+root.outerHTML;
+ // Validate the exact payload that will be sent.
+ let check=new DOMParser().parseFromString(html,'text/html');
+ if(!check.documentElement||!check.head||!check.body)throw new Error('Generated application HTML is incomplete.');
+ return html;
 }
 async function publishOnlineApp(){
  if(CURRENT_PROFILE?.role!=='teacher')return;
  let out=document.getElementById('publishResult');
  try{
    out.textContent='Publishing...';setSync('Publishing app...');
-   let token=await freshAccessToken();let html=cleanCloneForPublish();
-   // Client-side sanity check prevents sending an incomplete DOM to the publish function.
+   let token=await freshAccessToken();let html=await cleanCloneForPublish();
    if(!/^<!doctype html>/i.test(html)||!/<html[\s>]/i.test(html)||!/<body[\s>]/i.test(html)||!/<\/body>/i.test(html))throw new Error('Generated application HTML is incomplete.');
    let data=await functionPost('publish-app',{html},token);
    out.innerHTML='Published successfully.<br><span class="linkBox">'+esc(data.public_url||PUBLIC_APP_URL)+'</span> <button class="tinyBtn" onclick="copyPublicAppLink()">Copy main link</button>';
    setSync('Published');toastMsg('Online app updated successfully.');
- }catch(e){out.textContent='Publish failed: '+(e?.message||String(e));setSync('Publish error');}
+ }catch(e){
+   let msg=e?.message||String(e);
+   out.textContent='Publish failed: '+msg;
+   setSync('Publish error');
+ }
 }
 async function copyPublicAppLink(){try{await navigator.clipboard.writeText(PUBLIC_APP_URL);toastMsg('Main app link copied.')}catch(e){prompt('Copy this link:',PUBLIC_APP_URL)}}
 async function createStudent(){if(CURRENT_PROFILE?.role!=='teacher')return;let name=document.getElementById('newStudentName').value.trim(),code=document.getElementById('newStudentCode').value.trim(),pin=document.getElementById('newStudentPin').value.trim(),out=document.getElementById('newStudentResult');try{out.textContent='Creating...';let token=await freshAccessToken();let data=await functionPost('create-student',{full_name:name,student_code:code,pin},token);let link=buildStudentLink(data.student.student_code);out.innerHTML=`Created <b>${esc(data.student.full_name)}</b> • Code: <b>${esc(data.student.student_code)}</b><br><span class="linkBox">${esc(link)}</span> <button class="tinyBtn" onclick="copyStudentLink(${js(data.student.student_code)})">Copy link</button>`;document.getElementById('newStudentName').value='';document.getElementById('newStudentCode').value='';document.getElementById('newStudentPin').value='';await loadTeacherDashboard()}catch(e){out.textContent=e.message}}
